@@ -29,6 +29,11 @@ local unistd = require("posix.unistd")
 -- or calculator "4²+18"
 --  34:copy:solo
 
+local function die(...)
+  io.stderr:write(string.format("lrunner: %s\n", string.format(...)))
+  os.exit(1)
+end
+
 local function readFile(file)
   local hand, err = io.open(file, "r")
   if not hand then return nil, err end
@@ -65,3 +70,7 @@ local function lc(file)
 end
 
 local config = {global = lc("/etc/lrunner.conf"), user = lc(os.getenv("HOME").."/.config/lrunner.conf")}
+
+if not (config.global or config.user) then
+  die("no configuration found")
+end
