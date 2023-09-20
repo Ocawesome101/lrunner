@@ -1,3 +1,5 @@
 # LRunner
 
 A bit like krunner, but i wrote it instead of the plasma devs and it uses lua.
+
+Needs `lua-sdl2`, `inotify`, and `luaposix`.

@@ -3,6 +3,8 @@
 
 local inotify = require("inotify")
 local unistd = require("posix.unistd")
+local sdl = require("SDL")
+local ttf = require("SDL.ttf")
 
 -- reads settings from /etc/lrunner.conf and ~/.config/lrunner.conf
 -- these tell us mostly where to find searchers.
@@ -74,3 +76,82 @@ local config = {global = lc("/etc/lrunner.conf"), user = lc(os.getenv("HOME").."
 if not (config.global or config.user) then
   die("no configuration found")
 end
+
+local function split(s, d)
+  local w = {}
+  for W in s:gmatch("[^"..d.."]+") do
+    w[#w+1] = W
+  end
+  return w
+end
+
+local function search(t, k)
+  local current = t
+  for i=1, #k do
+    if not current then return end
+    if current[k[i]] then
+      current = current[k[i]]
+      if i == #k then return current end
+    end
+  end
+end
+
+local function config_get(k)
+  local fields = split(k, ".")
+  return search(config.user, fields) or search(config.global, fields)
+end
+
+assert(sdl.init {
+  sdl.flags.Video,
+  sdl.flags.Events
+})
+
+assert(ttf.init())
+
+local dmode = assert(sdl.getDesktopDisplayMode(0))
+local width, height = dmode.w, dmode.h
+
+local window = sdl.createWindow {
+  width = width,
+  height = 20,
+  flags = {
+    --sdl.window.Borderless,
+    sdl.window.Resizable,
+    --sdl.window.InputFocused
+  }
+}
+
+local size = config_get("appearance.font_size") or 12
+local font = ttf.open(config_get("appearance.font"), size)
+local bg = config_get("appearance.background") or 0x323232
+local bg_focused = config_get("appearance.focused") or 0x285577
+local fg = config_get("appearance.text") or 0xffffff
+
+local renderer = sdl.createRenderer(window, 0, {sdl.rendererFlags.PresentVSYNC})
+
+local function render(lines, selected)
+  window:setSize(width, (size + 4) * #lines)
+  local ws = sdl.createRGBSurface(width, (size + 4) * #lines)
+  for i=1, #lines do
+    --local w = font:sizeUtf8(lines[i])
+    local s = font:renderUtf8(lines[i], "shaded", i == selected and 0xAAAAFF or 0xFFFFFF)--, i == selected and bg_focused or bg)
+    --ws:fillRect({w = width, h = size + 4, x = 0, y = (size + 4) * (i - 1)}, i == selected and bg_focused or bg)
+    s:blit(ws, nil, {w = w, h = size + 4, x = 0, y = (size + 4) * (i - 1)})
+  end
+  local tex = renderer:createTextureFromSurface(ws)
+  renderer:copy(tex)
+  renderer:present()
+  --window:updateSurface()
+end
+
+local quit
+while not quit do
+  render({"this", "is", "a", "test"}, 3)
+  for e in sdl.pollEvent() do
+    if e.type == sdl.event.Quit then
+      quit = true
+    end
+  end
+end
+
+sdl.quit()
