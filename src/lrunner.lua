@@ -3,33 +3,13 @@
 
 local inotify = require("inotify")
 local unistd = require("posix.unistd")
+local dirent = require("posix.dirent")
+local signal = require("posix.signal")
+local fcntl = require("posix.fcntl")
+local stat = require("posix.sys.stat")
+local wait = require("posix.sys.wait")
 local sdl = require("SDL")
 local ttf = require("SDL.ttf")
-
--- reads settings from /etc/lrunner.conf and ~/.config/lrunner.conf
--- these tell us mostly where to find searchers.
--- searchers are written in any language you like but must be executable.
--- they are invoked like this:
---  $ searcher "query"
--- they must write results into stdout, like this:
---  str:action:qualifier
---  str:action:qualifier
---  ...
--- str is the displayed name
--- action is the action to execute:
---  lua(...): execute some lua code
---  exec(...): execute a file directly
---  open: open the file in user's specified text editor (or file manager)
---  complete: complete the search query using that entry
---  copy: copy result to clipboard
--- qualifier field is optional but may be:
---  solo: this is the only result displayed
--- e.g. fs_searcher "/li"
---  /lib:complete
---  /libexec:complete
---  /linux:exec(/linux)
--- or calculator "4²+18"
---  34:copy:solo
 
 local function die(...)
   io.stderr:write(string.format("lrunner: %s\n", string.format(...)))
@@ -112,10 +92,11 @@ local dmode = assert(sdl.getDesktopDisplayMode(0))
 local width, height = dmode.w, dmode.h
 
 local window = sdl.createWindow {
-  width = width,
-  height = 20,
+  width = 80*7,
+  height = 25*16,
+  x = 0, y = 0,
   flags = {
-    --sdl.window.Borderless,
+    sdl.window.Borderless,
     sdl.window.Resizable,
     --sdl.window.InputFocused
   }
@@ -130,26 +111,198 @@ local fg = config_get("appearance.text") or 0xffffff
 local renderer = sdl.createRenderer(window, 0, {sdl.rendererFlags.PresentVSYNC})
 
 local function render(lines, selected)
-  window:setSize(width, (size + 4) * #lines)
-  local ws = sdl.createRGBSurface(width, (size + 4) * #lines)
+  local width, height = window:getSize()
+  local ws = sdl.createRGBSurface(width, height)
+  renderer:clear()
+  ws:fillRect({{w = width, h = height, x = 0, y = 0}, bg})
   for i=1, #lines do
-    --local w = font:sizeUtf8(lines[i])
-    local s = font:renderUtf8(lines[i], "shaded", i == selected and 0xAAAAFF or 0xFFFFFF)--, i == selected and bg_focused or bg)
-    --ws:fillRect({w = width, h = size + 4, x = 0, y = (size + 4) * (i - 1)}, i == selected and bg_focused or bg)
-    s:blit(ws, nil, {w = w, h = size + 4, x = 0, y = (size + 4) * (i - 1)})
+    local s = font:renderUtf8(lines[i].text or lines[i], "shaded", i == selected and 0xAAAAFF or 0xFFFFFF)--, i == selected and bg_focused or bg)
+    ws:fillRect({w = width, h = size + 4, x = 0, y = (size + 4) * (i - 1)}, i == selected and bg_focused or bg)
+    s:blit(ws, nil, {w = width, h = size + 4, x = 0, y = (size + 4) * (i - 1)})
   end
   local tex = renderer:createTextureFromSurface(ws)
   renderer:copy(tex)
   renderer:present()
-  --window:updateSurface()
 end
 
 local quit
+
+local query, position, results, selected = "", 0, {}, 1
+local queries, cqid = {}, 0
+
+local runners = {}
+do
+  local dirs_global, dirs_local = config.global and config.global.searchers, config.user and config.user.searchers
+  local function add_runners(dirs)
+    for i=1, #dirs do
+      local files = dirent.dir(dirs[i])
+      table.sort(files)
+      for f=1, #files do if files[f]:sub(1,1) ~= "." then runners[#runners+1] = dirs[i].."/"..files[f] end end
+    end
+  end
+
+  if dirs_local then add_runners(dirs_local) end
+  if dirs_global then add_runners(dirs_global) end
+end
+
+local function beginQuery(text)
+  selected = 1
+  local id = math.random(100000, 999999)
+  if #text == 0 then results = {} return end
+  local handle = inotify.init { blocking = false }
+  local watchers = {}
+  local pids = {}
+  for i=1, #runners do
+    local runner_id = math.random(1000000, 9999999)
+    local output_file = "/tmp/lrunner-"..id.."-"..runner_id
+    -- create output file
+    io.open(output_file, "w"):close()
+    -- launch searcher in new process
+    local pid = unistd.fork()
+    if pid == 0 then
+      handle:close()
+      --sdl.quit()
+      local fd = fcntl.open(output_file, fcntl.O_WRONLY)
+      unistd.dup2(fd, 1) -- redirect stdout to tmpfile
+      unistd.execp(runners[i], {text})
+    else
+      pids[i] = pid
+      local wid = handle:addwatch(output_file, inotify.IN_CLOSE_WRITE)
+      if wid then watchers[wid] = output_file end
+    end
+  end
+  cqid = id
+  queries[cqid] = {handle = handle, pids = pids, watchers = watchers}
+end
+
+-- TODO: handle `:` in search queries?
+local function processResult(line)
+  local text, action, qualify = table.unpack(split(line, ":"))
+  if not text or #text == 0 then return end
+  local result = {}
+  print(action)
+  if action:sub(1,8) == "complete" then
+    result.text = "... | " .. text
+    local provided = action:match("%b()")
+    if provided then provided = provided:sub(2,-2) end
+    result.complete = provided or text
+  elseif action:sub(1,4) == "exec" then
+    result.text = "~$: | " .. text
+    result.exec = action:match("%b()"):sub(2,-2)
+  elseif action:sub(1,3) == "lua" then
+    result.text = "lua | " .. text
+    result.lua = action:match("%b()")
+  elseif action:sub(1,4) == "copy" then
+    result.text = " ^C | " .. text
+    result.copy = text
+  elseif action:sub(1,4) == "open" then
+    result.text = "</> | " .. text
+    result.open = action:match("%b()"):sub(2,-2)
+  end
+
+  results[#results+1] = result
+  
+  table.sort(results, function(a, b) return a.text < b.text end)
+end
+
+local function act(result)
+  if result.lua then
+    -- TODO
+  elseif result.exec then
+    sdl.quit()
+    unistd.execp("sh", {"-c", result.exec})
+  elseif result.open then
+    local editor = config_get("programs.editor") or "/bin/xdg-open"
+    local files = config_get("programs.files") or "/bin/xdg-open"
+    local info = stat.stat(result.open)
+    sdl.quit()
+    if stat.S_ISDIR(info.st_mode) ~= 0 then
+      unistd.execp("sh", {"-c", files.." "..result.open})
+    else
+      unistd.execp("sh", {"-c", editor.." "..result.open})
+    end
+  elseif result.complete then
+    query = result.complete
+    position = #query
+    beginQuery(query)
+  elseif result.copy then
+    sdl.quit()
+    unistd.execp(config_get("programs.clipboard") or "wl-copy", {result.copy})
+  end
+end
+
 while not quit do
-  render({"this", "is", "a", "test"}, 3)
+  render(table.pack("? " .. query:sub(1,position).."|"..query:sub(position+1) .. " ", table.unpack(results)), selected+1)
   for e in sdl.pollEvent() do
     if e.type == sdl.event.Quit then
       quit = true
+    elseif e.type == sdl.event.WindowEvent then
+      if e.event == sdl.eventWindow.FocusLost then
+        window:raise()
+      end
+    elseif e.type == sdl.event.TextInput then
+      query = query:sub(1, position) .. e.text .. query:sub(position + 1)
+      position = position + 1
+      beginQuery(query)
+    elseif e.type == sdl.event.KeyDown then
+      if e.keysym.sym == sdl.key.Backspace then
+        query = query:sub(1, position - 1) .. query:sub(position + 1)
+        position = math.max(0, position - 1)
+        beginQuery(query)
+      elseif e.keysym.sym == sdl.key.Delete then
+        query = query:sub(1, position) .. query:sub(position + 2)
+        beginQuery(query)
+      elseif e.keysym.sym == sdl.key.Escape then
+        quit = true
+      elseif e.keysym.sym == sdl.key.Home then
+        position = 0
+      elseif e.keysym.sym == sdl.key.End then
+        position = #query
+      elseif e.keysym.sym == sdl.key.Left then
+        position = math.max(0, position - 1)
+      elseif e.keysym.sym == sdl.key.Right then
+        position = math.min(#query, position + 1)
+      elseif e.keysym.sym == sdl.key.Up then
+        selected = math.max(1, selected - 1)
+      elseif e.keysym.sym == sdl.key.Down then
+        selected = math.max(1, math.min(#results, selected + 1))
+      elseif e.keysym.sym == sdl.key.Return then
+        if results[selected] then act(results[selected]) end
+      end
+    end
+  end
+  local cq = queries[cqid]
+  -- trim old queries
+  for k, v in pairs(queries) do
+    if k ~= cqid then -- don't trim current
+      -- close inotify handle, if open
+      if v.handle then
+        v.handle:close()
+        v.handle = nil
+      end
+      -- wait for searcher processes
+      for i=#v.pids, 1, -1 do
+        signal.kill(v.pids[i])
+        if select(2, wait.wait(v.pids[i], wait.WNOHANG)) ~= "running" then
+          table.remove(v.pids, i)
+        end
+      end
+      -- remove from table once all searcher processes have exited
+      if #v.pids == 0 then
+        queries[k] = nil
+      end
+    end
+  end
+  if cq then
+    for e in cq.handle:events() do
+      local wid = e.wd
+      local handle = io.open(cq.watchers[wid], "r")
+      if not cq.got_results then results = {} end
+      cq.got_results = true
+      for line in handle:lines() do
+        processResult(line)
+      end
+      handle:close()
     end
   end
 end

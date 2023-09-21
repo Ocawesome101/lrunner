@@ -1,5 +1,40 @@
 # LRunner
 
-A bit like krunner, but i wrote it instead of the plasma devs and it uses lua.
+A bit like krunner, but i wrote it instead of the plasma devs and it uses lua.  Probably only works on *nix-like systems.
 
-Needs `lua-sdl2`, `inotify`, and `luaposix`.
+Potential reasons to use LRunner:
+  - It's lightweight
+  - It's minimal
+  - It makes sense
+  - It's not tied to any specific desktop environment
+  - Writing custom searchers is ridiculously easy
+
+Needs `lua-sdl2`, `inotify`, and `luaposix`.  I may rewrite LRunner in C at some point for even more speed.
+
+## Usage
+
+LRunner presents a prompt `? ` at which the user may type a query string.  Depending on the string and the searchers present, the user may be given a list of results, with the following prefixes:
+
+  - `...`: The search query will be replaced with this text
+  - `~$:`: The entry will be executed
+  - ` ^C`: The entry will be copied
+  - `</>`: The entry will be opened
+
+## Configuration
+
+LRunner reads its configuration from `/etc/lrunner.conf` (global) and `$HOME/.config/lrunner.conf` (user).  This configures certain bits of it.  The included `default.conf` demonstrates most supported options.
+
+## Writing searchers
+
+LRunner searchers are simple executable files and may be written in any language.  They are invoked with the query as their first argument and must output results to stdout in the format `str:action:qualifier`, one result per line.  Searchers are executed as separate processes and their output is only read after they close their standard output stream (usually when they exit).  Output is gathered semi-asynchronously using `inotify`.
+
+`str` is the text to do something with.  `action` is the action to perform.  `qualifier` is optional and can specify whether a result should be the only one present.
+
+Valid values for `action` are:
+  - `open(path)`: Open the given `path` using either the configured `programs.editor` (`programs.files` for directories) or `xdg-open`.
+  - `complete`: Replaces the search query with the given text.
+  - `complete(text): Replaces the search query with this text.`
+  - `copy`: Copy the given text to the clipboard.  Uses `programs.clipboard` or `wl-copy`.
+  - `exec(file)`: Execute the given `file`.
+
+If `qualifier` is `solo` then that result will be the only result displayed.
