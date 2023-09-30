@@ -24,6 +24,10 @@ local function readFile(file)
   return data
 end
 
+-- checking this file notifies the existing lrunner process that its window should pop into existence
+-- inotify is magical
+if stat.stat("/proc/"..(readFile("/tmp/lrunner-process") or 0)) then return end
+
 -- load configuration
 local function lc(file)
   local data, err = readFile(file)
@@ -95,6 +99,7 @@ local window = sdl.createWindow {
   width = 80*7,
   height = 25*16,
   x = 0, y = 0,
+  title = "LRunner",
   flags = {
     sdl.window.Borderless,
     sdl.window.Resizable,
@@ -131,6 +136,7 @@ local query, position, results, selected = "", 0, {}, 1
 local queries, cqid = {}, 0
 
 local runners = {}
+local processing = {}
 do
   local dirs_global, dirs_local = config.global and config.global.searchers, config.user and config.user.searchers
   local function add_runners(dirs)
@@ -148,7 +154,10 @@ end
 local function beginQuery(text)
   selected = 1
   local id = math.random(100000, 999999)
-  if #text == 0 then results = {} return end
+  if #text == 0 then
+    results = {}
+    for i=#processing, 1, -1 do table.remove(processing, i).handle:close() end
+    return end
   local handle = inotify.init { blocking = false }
   local watchers = {}
   local pids = {}
@@ -180,7 +189,6 @@ local function processResult(line)
   local text, action, qualify = table.unpack(split(line, ":"))
   if not text or #text == 0 then return end
   local result = {}
-  print(action)
   if action:sub(1,8) == "complete" then
     result.text = "... | " .. text
     local provided = action:match("%b()")
@@ -205,105 +213,157 @@ local function processResult(line)
   table.sort(results, function(a, b) return a.text < b.text end)
 end
 
+local hidden = false
 local function act(result)
   if result.lua then
     -- TODO
   elseif result.exec then
-    sdl.quit()
-    unistd.execp("sh", {"-c", result.exec})
+    hidden = true
+    local pid = unistd.fork()
+    if pid == 0 then
+      unistd.execp("sh", {"-c", result.exec})
+    end
   elseif result.open then
     local editor = config_get("programs.editor") or "/bin/xdg-open"
     local files = config_get("programs.files") or "/bin/xdg-open"
     local info = stat.stat(result.open)
-    sdl.quit()
-    if stat.S_ISDIR(info.st_mode) ~= 0 then
-      unistd.execp("sh", {"-c", files.." "..result.open})
-    else
-      unistd.execp("sh", {"-c", editor.." "..result.open})
+    hidden = true
+    local pid = unistd.fork()
+    if pid == 0 then
+      if stat.S_ISDIR(info.st_mode) ~= 0 then
+        unistd.execp("sh", {"-c", files.." "..result.open})
+      else
+        unistd.execp("sh", {"-c", editor.." "..result.open})
+      end
     end
   elseif result.complete then
     query = result.complete
     position = #query
     beginQuery(query)
   elseif result.copy then
-    sdl.quit()
-    unistd.execp(config_get("programs.clipboard") or "wl-copy", {result.copy})
+    hidden = true
+    local pid = unistd.fork()
+    if pid == 0 then
+      unistd.execp(config_get("programs.clipboard") or "wl-copy", {result.copy})
+    end
   end
 end
 
+local lr = io.open("/tmp/lrunner-process", "w")
+lr:write(tostring(unistd.getpid()))
+lr:close()
+
+local lrp = inotify.init {blocking=false}
+lrp:addwatch("/tmp/lrunner-process", inotify.IN_ACCESS)
+
 while not quit do
-  render(table.pack("? " .. query:sub(1,position).."|"..query:sub(position+1) .. " ", table.unpack(results)), selected+1)
-  for e in sdl.pollEvent() do
-    if e.type == sdl.event.Quit then
-      quit = true
-    elseif e.type == sdl.event.WindowEvent then
-      if e.event == sdl.eventWindow.FocusLost then
-        window:raise()
-      end
-    elseif e.type == sdl.event.TextInput then
-      query = query:sub(1, position) .. e.text .. query:sub(position + 1)
-      position = position + 1
-      beginQuery(query)
-    elseif e.type == sdl.event.KeyDown then
-      if e.keysym.sym == sdl.key.Backspace then
-        query = query:sub(1, position - 1) .. query:sub(position + 1)
-        position = math.max(0, position - 1)
-        beginQuery(query)
-      elseif e.keysym.sym == sdl.key.Delete then
-        query = query:sub(1, position) .. query:sub(position + 2)
-        beginQuery(query)
-      elseif e.keysym.sym == sdl.key.Escape then
-        quit = true
-      elseif e.keysym.sym == sdl.key.Home then
-        position = 0
-      elseif e.keysym.sym == sdl.key.End then
-        position = #query
-      elseif e.keysym.sym == sdl.key.Left then
-        position = math.max(0, position - 1)
-      elseif e.keysym.sym == sdl.key.Right then
-        position = math.min(#query, position + 1)
-      elseif e.keysym.sym == sdl.key.Up then
-        selected = math.max(1, selected - 1)
-      elseif e.keysym.sym == sdl.key.Down then
-        selected = math.max(1, math.min(#results, selected + 1))
-      elseif e.keysym.sym == sdl.key.Return then
-        if results[selected] then act(results[selected]) end
-      end
+  if hidden then
+    for e in lrp:events() do
+      print("GOT EVENT")
+      hidden = false
+      print(hidden)
     end
-  end
-  local cq = queries[cqid]
-  -- trim old queries
-  for k, v in pairs(queries) do
-    if k ~= cqid then -- don't trim current
-      -- close inotify handle, if open
-      if v.handle then
-        v.handle:close()
-        v.handle = nil
-      end
-      -- wait for searcher processes
-      for i=#v.pids, 1, -1 do
-        signal.kill(v.pids[i])
-        if select(2, wait.wait(v.pids[i], wait.WNOHANG)) ~= "running" then
-          table.remove(v.pids, i)
+    if not hidden then print("SHOW") window:show() end
+  else
+    local _, h = window:getSize()
+    local maxnum = math.ceil(h / (size + 4))
+    render(table.pack("? " .. query:sub(1,position).."|"..query:sub(position+1) .. " ", table.unpack(results, 1, maxnum)), selected+1)
+    for e in sdl.pollEvent() do
+      if e.type == sdl.event.Quit then
+        quit = true
+      elseif e.type == sdl.event.WindowEvent then
+        if e.event == sdl.eventWindow.FocusLost then
+          window:raise()
+        end
+      elseif e.type == sdl.event.TextInput then
+        query = query:sub(1, position) .. e.text .. query:sub(position + 1)
+        position = position + 1
+        beginQuery(query)
+      elseif e.type == sdl.event.KeyDown then
+        if e.keysym.sym == sdl.key.Backspace then
+          query = query:sub(1, position - 1) .. query:sub(position + 1)
+          position = math.max(0, position - 1)
+          beginQuery(query)
+        elseif e.keysym.sym == sdl.key.Delete then
+          query = query:sub(1, position) .. query:sub(position + 2)
+          beginQuery(query)
+        elseif e.keysym.sym == sdl.key.Escape then
+          hidden = true
+        elseif e.keysym.sym == sdl.key.Home then
+          position = 0
+        elseif e.keysym.sym == sdl.key.End then
+          position = #query
+        elseif e.keysym.sym == sdl.key.Left then
+          position = math.max(0, position - 1)
+        elseif e.keysym.sym == sdl.key.Right then
+          position = math.min(#query, position + 1)
+        elseif e.keysym.sym == sdl.key.Up then
+          selected = math.max(1, selected - 1)
+        elseif e.keysym.sym == sdl.key.Down then
+          selected = math.max(1, math.min(#results, selected + 1))
+        elseif e.keysym.sym == sdl.key.Return then
+          if results[selected] then
+            hidden = true
+            act(results[selected])
+          end
         end
       end
-      -- remove from table once all searcher processes have exited
-      if #v.pids == 0 then
-        queries[k] = nil
+    end
+    local cq = queries[cqid]
+    -- trim old queries
+    for k, v in pairs(queries) do
+      if k ~= cqid then -- don't trim current
+        -- close inotify handle, if open
+        if v.handle then
+          v.handle:close()
+          v.handle = nil
+        end
+        -- close results handle
+        for i=#processing, 1, -1 do
+          if processing[i].qid == k then
+            processing[i].handle:close()
+            table.remove(processing, i)
+          end
+        end
+        -- wait for searcher processes
+        for i=#v.pids, 1, -1 do
+          signal.kill(v.pids[i])
+          if select(2, wait.wait(v.pids[i], wait.WNOHANG)) ~= "running" then
+            table.remove(v.pids, i)
+          end
+        end
+        -- remove from table once all searcher processes have exited
+        if #v.pids == 0 then
+          queries[k] = nil
+        end
       end
     end
-  end
-  if cq then
-    for e in cq.handle:events() do
-      local wid = e.wd
-      local handle = io.open(cq.watchers[wid], "r")
-      if not cq.got_results then results = {} end
-      cq.got_results = true
-      for line in handle:lines() do
-        processResult(line)
+    if cq then
+      for e in cq.handle:events() do
+        local wid = e.wd
+        local handle = io.open(cq.watchers[wid], "r")
+        if not cq.got_results then results = {} end
+        cq.got_results = true
+        processing[#processing+1] = {handle = handle, qid = cqid}
       end
-      handle:close()
     end
+    -- process 100 results per update
+    -- not _fast_ on my machine, but keeps things moving
+    local total = 0
+    local max = config_get("performance.results_per_render")
+    for i=#processing, 1, -1 do
+      repeat
+        local line = processing[i].handle:read("l")
+        if line then
+          total = total + 1
+          processResult(line)
+        else
+          table.remove(processing, i).handle:close()
+        end
+      until total >= max or not line
+      if total >= max then break end
+    end
+    if hidden then window:hide() end
   end
 end
 
