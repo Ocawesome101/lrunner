@@ -115,6 +115,7 @@ local fg = config_get("appearance.text") or 0xffffff
 
 local renderer = sdl.createRenderer(window, 0, {sdl.rendererFlags.PresentVSYNC})
 
+local dirty = true
 local function render(lines, selected)
   local width, height = window:getSize()
   local ws = sdl.createRGBSurface(width, height)
@@ -249,6 +250,90 @@ local function act(result)
   end
 end
 
+local function processEvent(e)
+  dirty = true
+  if e.type == sdl.event.Quit then
+    quit = true
+  elseif e.type == sdl.event.WindowEvent then
+    if e.event == sdl.eventWindow.FocusLost then
+      window:raise()
+    end
+  elseif e.type == sdl.event.TextInput then
+    query = query:sub(1, position) .. e.text .. query:sub(position + 1)
+    position = position + 1
+    beginQuery(query)
+  elseif e.type == sdl.event.KeyDown then
+    if e.keysym.sym == sdl.key.Backspace then
+      query = query:sub(1, position - 1) .. query:sub(position + 1)
+      position = math.max(0, position - 1)
+      beginQuery(query)
+    elseif e.keysym.sym == sdl.key.Delete then
+      query = query:sub(1, position) .. query:sub(position + 2)
+      beginQuery(query)
+    elseif e.keysym.sym == sdl.key.Escape then
+      hidden = true
+    elseif e.keysym.sym == sdl.key.Home then
+      position = 0
+    elseif e.keysym.sym == sdl.key.End then
+      position = #query
+    elseif e.keysym.sym == sdl.key.Left then
+      position = math.max(0, position - 1)
+    elseif e.keysym.sym == sdl.key.Right then
+      position = math.min(#query, position + 1)
+    elseif e.keysym.sym == sdl.key.Up then
+      selected = math.max(1, selected - 1)
+    elseif e.keysym.sym == sdl.key.Down then
+      selected = math.max(1, math.min(#results, selected + 1))
+    elseif e.keysym.sym == sdl.key.Return then
+      if results[selected] then
+        hidden = true
+        act(results[selected])
+      end
+    end
+  end
+end
+
+local function checkResults()
+  local cq = queries[cqid]
+  -- trim old queries
+  for k, v in pairs(queries) do
+    if k ~= cqid then -- don't trim current
+      -- close inotify handle, if open
+      if v.handle then
+        v.handle:close()
+        v.handle = nil
+      end
+      -- close results handle
+      for i=#processing, 1, -1 do
+        if processing[i].qid == k then
+          processing[i].handle:close()
+          table.remove(processing, i)
+        end
+      end
+      -- wait for searcher processes
+      for i=#v.pids, 1, -1 do
+        signal.kill(v.pids[i])
+        if select(2, wait.wait(v.pids[i], wait.WNOHANG)) ~= "running" then
+          table.remove(v.pids, i)
+        end
+      end
+      -- remove from table once all searcher processes have exited
+      if #v.pids == 0 then
+        queries[k] = nil
+      end
+    end
+  end
+  if cq then
+    for e in cq.handle:events() do
+      local wid = e.wd
+      local handle = io.open(cq.watchers[wid], "r")
+      if not cq.got_results then results = {} end
+      cq.got_results = true
+      processing[#processing+1] = {handle = handle, qid = cqid}
+    end
+  end
+end
+
 local lr = io.open("/tmp/lrunner-process", "w")
 lr:write(tostring(unistd.getpid()))
 lr:close()
@@ -256,94 +341,25 @@ lr:close()
 local lrp = inotify.init {blocking=true}
 lrp:addwatch("/tmp/lrunner-process", inotify.IN_ACCESS)
 
+-- i call render() a few extra times as kind of a hack
+render({})
 while not quit do
   if hidden then
     local e = lrp:read()
     hidden = false
-    if not hidden then window:show() end
+    if not hidden then window:show() render({}) render({}) dirty = true end
   else
     local _, h = window:getSize()
     local maxnum = math.ceil(h / (size + 4))
-    render(table.pack("? " .. query:sub(1,position).."|"..query:sub(position+1) .. " ", table.unpack(results, 1, maxnum)), selected+1)
+    if dirty then
+      render(table.pack("? " .. query:sub(1,position).."|"..query:sub(position+1) .. " ", table.unpack(results, 1, maxnum)), selected+1)
+      dirty = false
+    end
     for e in sdl.pollEvent() do
-      if e.type == sdl.event.Quit then
-        quit = true
-      elseif e.type == sdl.event.WindowEvent then
-        if e.event == sdl.eventWindow.FocusLost then
-          window:raise()
-        end
-      elseif e.type == sdl.event.TextInput then
-        query = query:sub(1, position) .. e.text .. query:sub(position + 1)
-        position = position + 1
-        beginQuery(query)
-      elseif e.type == sdl.event.KeyDown then
-        if e.keysym.sym == sdl.key.Backspace then
-          query = query:sub(1, position - 1) .. query:sub(position + 1)
-          position = math.max(0, position - 1)
-          beginQuery(query)
-        elseif e.keysym.sym == sdl.key.Delete then
-          query = query:sub(1, position) .. query:sub(position + 2)
-          beginQuery(query)
-        elseif e.keysym.sym == sdl.key.Escape then
-          hidden = true
-        elseif e.keysym.sym == sdl.key.Home then
-          position = 0
-        elseif e.keysym.sym == sdl.key.End then
-          position = #query
-        elseif e.keysym.sym == sdl.key.Left then
-          position = math.max(0, position - 1)
-        elseif e.keysym.sym == sdl.key.Right then
-          position = math.min(#query, position + 1)
-        elseif e.keysym.sym == sdl.key.Up then
-          selected = math.max(1, selected - 1)
-        elseif e.keysym.sym == sdl.key.Down then
-          selected = math.max(1, math.min(#results, selected + 1))
-        elseif e.keysym.sym == sdl.key.Return then
-          if results[selected] then
-            hidden = true
-            act(results[selected])
-          end
-        end
-      end
+      processEvent(e)
+      dirty = true
     end
-    local cq = queries[cqid]
-    -- trim old queries
-    for k, v in pairs(queries) do
-      if k ~= cqid then -- don't trim current
-        -- close inotify handle, if open
-        if v.handle then
-          v.handle:close()
-          v.handle = nil
-        end
-        -- close results handle
-        for i=#processing, 1, -1 do
-          if processing[i].qid == k then
-            processing[i].handle:close()
-            table.remove(processing, i)
-          end
-        end
-        -- wait for searcher processes
-        for i=#v.pids, 1, -1 do
-          signal.kill(v.pids[i])
-          if select(2, wait.wait(v.pids[i], wait.WNOHANG)) ~= "running" then
-            table.remove(v.pids, i)
-          end
-        end
-        -- remove from table once all searcher processes have exited
-        if #v.pids == 0 then
-          queries[k] = nil
-        end
-      end
-    end
-    if cq then
-      for e in cq.handle:events() do
-        local wid = e.wd
-        local handle = io.open(cq.watchers[wid], "r")
-        if not cq.got_results then results = {} end
-        cq.got_results = true
-        processing[#processing+1] = {handle = handle, qid = cqid}
-      end
-    end
+    checkResults()
     -- process 100 results per update
     -- not _fast_ on my machine, but keeps things moving
     local total = 0
@@ -359,6 +375,15 @@ while not quit do
         end
       until total >= max or not line
       if total >= max then break end
+    end
+
+    -- cpu time optimization: block on waiting for an event if the current query has no remaining queries
+    if #processing == 0 then
+      local e = sdl.waitEvent()
+      if e then
+        dirty = true
+        processEvent(e)
+      end
     end
     if hidden then window:hide() end
   end
