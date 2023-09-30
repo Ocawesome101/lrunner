@@ -253,17 +253,14 @@ local lr = io.open("/tmp/lrunner-process", "w")
 lr:write(tostring(unistd.getpid()))
 lr:close()
 
-local lrp = inotify.init {blocking=false}
+local lrp = inotify.init {blocking=true}
 lrp:addwatch("/tmp/lrunner-process", inotify.IN_ACCESS)
 
 while not quit do
   if hidden then
-    for e in lrp:events() do
-      print("GOT EVENT")
-      hidden = false
-      print(hidden)
-    end
-    if not hidden then print("SHOW") window:show() end
+    local e = lrp:read()
+    hidden = false
+    if not hidden then window:show() end
   else
     local _, h = window:getSize()
     local maxnum = math.ceil(h / (size + 4))
