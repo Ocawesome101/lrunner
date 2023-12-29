@@ -1,0 +1,15 @@
+#!/usr/bin/env lua
+-- Change system volume using amixer.
+
+local query = ...
+
+if (not query) or #query < 3 or query:sub(1,2) ~= "v=" then return end
+
+local function set(num)
+  return "amixer sset Master " .. num.."%"
+end
+
+local q = tonumber(query:sub(3))
+if q and q <= 100 and q >= 0 then
+  print("«) "..q.."%:exec("..set(q)..")")
+end

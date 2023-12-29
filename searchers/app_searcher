@@ -1,0 +1,20 @@
+#!/bin/bash
+# Search $PATH for an executable
+
+query="$1"
+
+if [ -z "$query" ]; then exit; fi
+
+name=${query}
+
+paths=$(echo $PATH | tr ":" "\n")
+
+for path in $paths; do
+  for f in $path/$name*; do
+    if ! [ -e "$f" ]; then
+      continue
+    elif [ -x "$f" ]; then
+      echo "$f:exec($f)"
+    fi
+  done
+done

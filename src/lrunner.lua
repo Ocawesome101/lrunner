@@ -61,10 +61,14 @@ if not (config.global or config.user) then
   die("no configuration found")
 end
 
-local function split(s, d)
+local function split(s, d, q)
   local w = {}
-  for W in s:gmatch("[^"..d.."]+") do
-    w[#w+1] = W
+  for p, W in s:gmatch("()([^"..d.."]+)") do
+    if s:sub(p-2,p-2) == q then
+      w[#w] = w[#w]:sub(1,-2) .. d .. W
+    else
+      w[#w+1] = W
+    end
   end
   return w
 end
@@ -115,7 +119,6 @@ local fg = config_get("appearance.text") or 0xffffff
 
 local renderer = sdl.createRenderer(window, 0, {sdl.rendererFlags.PresentVSYNC})
 
-local dirty = true
 local function render(lines, selected)
   local width, height = window:getSize()
   local ws = sdl.createRGBSurface(width, height)
@@ -187,7 +190,7 @@ end
 
 -- TODO: handle `:` in search queries?
 local function processResult(line)
-  local text, action, qualify = table.unpack(split(line, ":"))
+  local text, action, qualify = table.unpack(split(line, ":", "%"))
   if not text or #text == 0 then return end
   local result = {}
   if action:sub(1,8) == "complete" then
@@ -208,6 +211,8 @@ local function processResult(line)
     result.text = "</> | " .. text
     result.open = action:match("%b()"):sub(2,-2)
   end
+
+  result.qualify = qualify
 
   results[#results+1] = result
   
@@ -241,6 +246,7 @@ local function act(result)
     query = result.complete
     position = #query
     beginQuery(query)
+    hidden = false
   elseif result.copy then
     hidden = true
     local pid = unistd.fork()
@@ -251,7 +257,6 @@ local function act(result)
 end
 
 local function processEvent(e)
-  dirty = true
   if e.type == sdl.event.Quit then
     quit = true
   elseif e.type == sdl.event.WindowEvent then
@@ -271,7 +276,12 @@ local function processEvent(e)
       query = query:sub(1, position) .. query:sub(position + 2)
       beginQuery(query)
     elseif e.keysym.sym == sdl.key.Escape then
-      hidden = true
+      if #query == 0 then
+        hidden = true
+      else
+        query = ""
+        position = 0
+      end
     elseif e.keysym.sym == sdl.key.Home then
       position = 0
     elseif e.keysym.sym == sdl.key.End then
@@ -314,6 +324,7 @@ local function checkResults()
       for i=#v.pids, 1, -1 do
         signal.kill(v.pids[i])
         if select(2, wait.wait(v.pids[i], wait.WNOHANG)) ~= "running" then
+          wait.wait(v.pids[i])
           table.remove(v.pids, i)
         end
       end
@@ -323,12 +334,14 @@ local function checkResults()
       end
     end
   end
+  local got_results = false
   if cq then
     for e in cq.handle:events() do
       local wid = e.wd
       local handle = io.open(cq.watchers[wid], "r")
       if not cq.got_results then results = {} end
       cq.got_results = true
+      got_results = true
       processing[#processing+1] = {handle = handle, qid = cqid}
     end
   end
@@ -341,23 +354,17 @@ lr:close()
 local lrp = inotify.init {blocking=true}
 lrp:addwatch("/tmp/lrunner-process", inotify.IN_ACCESS)
 
--- i call render() a few extra times as kind of a hack
-render({})
 while not quit do
   if hidden then
     local e = lrp:read()
     hidden = false
-    if not hidden then window:show() render({}) render({}) dirty = true end
+    if not hidden then window:show() end
   else
     local _, h = window:getSize()
     local maxnum = math.ceil(h / (size + 4))
-    if dirty then
-      render(table.pack("? " .. query:sub(1,position).."|"..query:sub(position+1) .. " ", table.unpack(results, 1, maxnum)), selected+1)
-      dirty = false
-    end
+    render(table.pack("? " .. query:sub(1,position).."|"..query:sub(position+1) .. " ", table.unpack(results, 1, maxnum)), selected+1)
     for e in sdl.pollEvent() do
       processEvent(e)
-      dirty = true
     end
     checkResults()
     -- process 100 results per update
@@ -379,9 +386,8 @@ while not quit do
 
     -- cpu time optimization: block on waiting for an event if the current query has no remaining queries
     if #processing == 0 then
-      local e = sdl.waitEvent()
+      local e = sdl.waitEvent(300)
       if e then
-        dirty = true
         processEvent(e)
       end
     end

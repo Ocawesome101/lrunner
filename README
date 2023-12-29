@@ -7,7 +7,7 @@ Potential reasons to use LRunner:
   - It's minimal
   - It makes sense
   - It's not tied to any specific desktop environment
-  - Writing custom searchers is ridiculously easy
+  - Writing custom searchers is ridiculously easy (see searchers/ for some examples)
 
 Needs `lua-sdl2`, `inotify`, and `luaposix`.  I may rewrite LRunner in C at some point for even more speed.
 

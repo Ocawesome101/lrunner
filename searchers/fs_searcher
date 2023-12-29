@@ -1,0 +1,29 @@
+#!/bin/bash
+# Navigate the filesystem, and open or execute files.
+
+query="$1"
+
+if [ "${query:0:1}" != "@" ]; then exit; fi
+
+path=${query:1}
+
+if [ -z "$path" ]; then
+  path="$HOME/"
+elif [ "${path:0:1}" != "/" ]; then
+  path="$HOME/$path"
+fi
+
+echo "..:complete(@$(dirname ${path:0:-2})/)"
+
+for f in ${path}*; do
+  base="${f##*/}"
+  if ! [ -e "$f" ]; then
+    continue
+  elif [ -d "$f" ]; then
+    echo "$base:complete(@$f/)"
+  elif [ -x "$f" ]; then
+    echo "$base:exec($f)"
+  else
+    echo "$base:open($f)"
+  fi
+done
