@@ -237,7 +237,7 @@ local function act(result)
     local pid = unistd.fork()
     if pid == 0 then
       if stat.S_ISDIR(info.st_mode) ~= 0 then
-        unistd.execp("sh", {"-c", files.." "..result.open})
+        unistd.execp("sh", {"-c", files.." "..result.open, "&", "exit"})
       else
         unistd.execp("sh", {"-c", editor.." "..result.open})
       end
@@ -313,10 +313,11 @@ local function checkResults()
         v.handle:close()
         v.handle = nil
       end
-      -- close results handle
+      -- close results handle and clean up tmpfile
       for i=#processing, 1, -1 do
         if processing[i].qid == k then
           processing[i].handle:close()
+          os.remove(processing[i].file)
           table.remove(processing, i)
         end
       end
@@ -342,7 +343,9 @@ local function checkResults()
       if not cq.got_results then results = {} end
       cq.got_results = true
       got_results = true
-      processing[#processing+1] = {handle = handle, qid = cqid}
+      if handle then
+        processing[#processing+1] = {handle = handle, qid = cqid, file = cq.watchers[wid]}
+      end
     end
   end
 end
@@ -378,6 +381,8 @@ while not quit do
           total = total + 1
           processResult(line)
         else
+          -- clean up file
+          os.remove(processing[i].file)
           table.remove(processing, i).handle:close()
         end
       until total >= max or not line

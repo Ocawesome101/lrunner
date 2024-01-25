@@ -5,6 +5,11 @@ query="$1"
 
 if [ -z "$query" ]; then exit; fi
 
+if [ "x$query" = "x?" ]; then
+  echo "search PATH, prefix none:complete()"
+  exit
+fi
+
 name=${query}
 
 paths=$(echo $PATH | tr ":" "\n")

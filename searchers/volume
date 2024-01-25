@@ -3,6 +3,10 @@
 
 local query = ...
 
+if query == "?" then
+  print("change volume, prefix v=:complete(v=)")
+end
+
 if (not query) or #query < 3 or query:sub(1,2) ~= "v=" then return end
 
 local function set(num)

@@ -1,0 +1,17 @@
+#!/usr/bin/env lua
+
+local query = ...
+
+if query == "?" then
+  print "run shell command, prefix $:complete($)"
+end
+
+if query:sub(1,1) ~= "$" then
+  return
+end
+
+query = query:sub(2)
+
+if #query > 0 then
+  print(query..":exec("..query..")")
+end

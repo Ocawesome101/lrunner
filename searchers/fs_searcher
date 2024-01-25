@@ -3,6 +3,10 @@
 
 query="$1"
 
+if [ "x$query" = "x?" ]; then
+  echo "navigate fs, prefix @:complete(@)"
+fi
+
 if [ "${query:0:1}" != "@" ]; then exit; fi
 
 path=${query:1}
