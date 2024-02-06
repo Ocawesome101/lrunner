@@ -317,7 +317,7 @@ local function checkResults()
     -- wait for searcher processes
     for i=#v.pids, 1, -1 do
       if select(2, wait.wait(v.pids[i], wait.WNOHANG)) ~= "running" then
-        v.pids[i], wait.wait(v.pids[i])
+        wait.wait(v.pids[i])
         table.remove(v.pids, i)
       end
     end
