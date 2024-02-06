@@ -227,8 +227,15 @@ local function act(result)
     hidden = true
     local pid = unistd.fork()
     if pid == 0 then
-      unistd.execp("sh", {"-c", result.exec})
+      -- hack to make this work correctly
+      local pidReal = unistd.fork()
+      if pidReal == 0 then
+        unistd.execp("sh", {"-c", result.exec})
+      else
+        os.exit()
+      end
     end
+    wait.wait(pid)
   elseif result.open then
     local editor = config_get("programs.editor") or "/bin/xdg-open"
     local files = config_get("programs.files") or "/bin/xdg-open"
@@ -307,6 +314,14 @@ local function checkResults()
   local cq = queries[cqid]
   -- trim old queries
   for k, v in pairs(queries) do
+    -- wait for searcher processes
+    for i=#v.pids, 1, -1 do
+      if select(2, wait.wait(v.pids[i], wait.WNOHANG)) ~= "running" then
+        v.pids[i], wait.wait(v.pids[i])
+        table.remove(v.pids, i)
+      end
+    end
+
     if k ~= cqid then -- don't trim current
       -- close inotify handle, if open
       if v.handle then
@@ -321,13 +336,8 @@ local function checkResults()
           table.remove(processing, i)
         end
       end
-      -- wait for searcher processes
       for i=#v.pids, 1, -1 do
         signal.kill(v.pids[i])
-        if select(2, wait.wait(v.pids[i], wait.WNOHANG)) ~= "running" then
-          wait.wait(v.pids[i])
-          table.remove(v.pids, i)
-        end
       end
       -- remove from table once all searcher processes have exited
       if #v.pids == 0 then
@@ -335,6 +345,7 @@ local function checkResults()
       end
     end
   end
+
   local got_results = false
   if cq then
     for e in cq.handle:events() do
