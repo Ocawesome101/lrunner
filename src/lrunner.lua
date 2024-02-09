@@ -232,10 +232,12 @@ local function act(result)
       if pidReal == 0 then
         unistd.execp("sh", {"-c", result.exec})
       else
-        os.exit()
+        error("os.exit() doesn't work here for some reason", 0)
+        os.exit(0)
       end
+    else
+      wait.wait(pid)
     end
-    wait.wait(pid)
   elseif result.open then
     local editor = config_get("programs.editor") or "/bin/xdg-open"
     local files = config_get("programs.files") or "/bin/xdg-open"
